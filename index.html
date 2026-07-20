@@ -92,7 +92,10 @@
           <div class="brand-eyebrow">Материалы одежды и обуви</div>
           <h1 class="title">Экран ведущего</h1>
         </div>
-        <div class="status-pill" id="connPill">подключение…</div>
+        <div style="display:flex; gap:16px; align-items:center;">
+          <button id="btnEndGame" class="ghost" style="display:none; color:var(--red); border-color:var(--red);">Завершить игру</button>
+          <div class="status-pill" id="connPill">подключение…</div>
+        </div>
       </header>
 
       <div class="screen active" id="screen-lobby">
@@ -343,6 +346,11 @@
     let timerHandle = null;
     let revealed = false;
 
+    // Переменные для автоматических переходов (таймеры)
+    let autoTimer = null;
+    let autoTargetTime = 0;
+    let autoStateKey = '';
+
     // Ссылка на роль игрока
     const joinUrl = 'https://ea-armani.github.io/quiz/?role=player';
     document.getElementById('joinUrl').textContent = joinUrl;
@@ -375,7 +383,17 @@
 
     function renderHost(){
       if(!state) return;
+
+      // Управление видимостью кнопки Завершения игры
+      const btnEndGame = document.getElementById('btnEndGame');
+      if (state.status === 'lobby' || state.status === 'ended') {
+        btnEndGame.style.display = 'none';
+      } else {
+        btnEndGame.style.display = 'inline-block';
+      }
+
       if(state.status === 'lobby'){
+        clearInterval(autoTimer); autoStateKey = '';
         showHostScreen('lobby');
         document.getElementById('playerCount').textContent = players.length + ' ' + pluralPart(players.length);
         document.getElementById('emptyNote').style.display = players.length ? 'none' : 'block';
@@ -386,6 +404,7 @@
           grid.appendChild(d);
         });
         document.getElementById('btnStart').disabled = players.length === 0;
+
       } else if(state.status === 'question' || state.status === 'reveal'){
         showHostScreen('question');
         revealed = state.status === 'reveal';
@@ -431,17 +450,59 @@
 
         clearInterval(timerHandle);
         if(!revealed){
+          clearInterval(autoTimer); autoStateKey = '';
           updateTimer();
           timerHandle = setInterval(updateTimer, 250);
         } else {
           document.getElementById('timer').textContent = '—';
+          // АВТОМАТИЧЕСКИЙ ТАЙМЕР ПОСЛЕ ОТВЕТА (5 секунд)
+          const stateKey = 'reveal_' + state.current_index;
+          const btnNext = document.getElementById('btnNext');
+          if (autoStateKey !== stateKey) {
+            clearInterval(autoTimer);
+            autoStateKey = stateKey;
+            autoTargetTime = Date.now() + 5000;
+            autoTimer = setInterval(() => {
+              const left = Math.ceil((autoTargetTime - Date.now()) / 1000);
+              if (left <= 0) {
+                clearInterval(autoTimer);
+                btnNext.textContent = 'Далее';
+                btnNext.click();
+              } else {
+                btnNext.textContent = `Далее (${left})`;
+              }
+            }, 250);
+          }
         }
+
       } else if(state.status === 'leaderboard'){
         showHostScreen('leaderboard');
         renderLeaderboard('lbList');
+        
+        // АВТОМАТИЧЕСКИЙ ТАЙМЕР НА ТАБЛИЦЕ ЛИДЕРОВ (7 секунд)
         const isLast = state.current_index >= TOTAL - 1;
-        document.getElementById('btnContinue').textContent = isLast ? 'Показать итог' : 'Следующий вопрос';
+        const baseText = isLast ? 'Показать итог' : 'Следующий вопрос';
+        const btnContinue = document.getElementById('btnContinue');
+        const stateKey = 'leaderboard_' + state.current_index;
+
+        if (autoStateKey !== stateKey) {
+          clearInterval(autoTimer);
+          autoStateKey = stateKey;
+          autoTargetTime = Date.now() + 7000;
+          autoTimer = setInterval(() => {
+            const left = Math.ceil((autoTargetTime - Date.now()) / 1000);
+            if (left <= 0) {
+              clearInterval(autoTimer);
+              btnContinue.textContent = baseText;
+              btnContinue.click();
+            } else {
+              btnContinue.textContent = `${baseText} (${left})`;
+            }
+          }, 250);
+        }
+
       } else if(state.status === 'ended'){
+        clearInterval(autoTimer); autoStateKey = '';
         showHostScreen('ended');
         renderLeaderboard('finalList');
       }
@@ -520,6 +581,13 @@
         await sb.from('game_state').update({status:'ended'}).eq('id',1);
       } else {
         await sb.from('game_state').update({status:'question', current_index: nextIndex, time_limit:20, question_started_at: new Date().toISOString()}).eq('id',1);
+      }
+    });
+
+    // Обработчик досрочного завершения игры
+    document.getElementById('btnEndGame').addEventListener('click', async ()=>{
+      if(confirm('Завершить игру досрочно? Вы перейдете к итоговому результату.')) {
+        await sb.from('game_state').update({status:'ended'}).eq('id',1);
       }
     });
 
