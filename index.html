@@ -81,8 +81,8 @@
       <div class="brand-eyebrow">Материалы одежды и обуви</div>
       <h1 class="title">Экран ведущего</h1>
     </div>
-    <div style="display: flex; align-items: center; gap: 10px;">
-      <button id="btnStopGlobal" class="ghost" style="display: none; padding: 6px 12px; font-size: 11px; border-color: var(--red); color: var(--red); font-weight: 700;">Завершить игру</button>
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <button id="btnStopGlobal" class="ghost" style="display: none; padding: 8px 14px; font-size: 11px; border-color: var(--red); color: var(--red); font-weight: 700; background: var(--red-bg);">Остановить игру</button>
       <div class="status-pill" id="connPill">подключение…</div>
     </div>
   </header>
@@ -154,17 +154,17 @@
   };
   function showScreen(name){ Object.values(screens).forEach(s=>s.classList.remove('active')); screens[name].classList.add('active'); }
 
-  let state = null;      // текущая строка game_state
+  let state = null;      
   let players = [];
-  let answers = [];      // ответы на текущий вопрос
-  let timerHandle = null;
+  let answers = [];      
+  let globalTimerHandle = null;
   let revealed = false;
 
-  // Переменные для автоматических переходов страниц
+  // Контроль автоматических переходов страниц
   let lastStatus = null;
   let lastIndex = null;
-  let stateTransitionTime = 0;
-  let autoAdvanceHandle = null;
+  let statusStartTime = 0;
+  let isUpdatingState = false; // Блокиратор повторных сетевых запросов
 
   const joinUrl = location.href.replace(/host\.html.*$/, 'player.html');
   document.getElementById('joinUrl').textContent = joinUrl;
@@ -191,24 +191,22 @@
 
   loadAll();
 
+  // Запуск единого централизованного таймера (каждые 200мс)
+  clearInterval(globalTimerHandle);
+  globalTimerHandle = setInterval(tick, 200);
+
   function render(){
     if(!state) return;
 
-    // Отслеживаем смену глобального статуса, чтобы запустить локальные таймеры автоперехода
+    // Фиксируем реальное время смены статуса игры локально
     if (state.status !== lastStatus || state.current_index !== lastIndex) {
       lastStatus = state.status;
       lastIndex = state.current_index;
-      stateTransitionTime = Date.now();
-      
-      if (autoAdvanceHandle) clearInterval(autoAdvanceHandle);
-      autoAdvanceHandle = null;
-      
-      if (state.status === 'reveal' || state.status === 'leaderboard') {
-        autoAdvanceHandle = setInterval(handleAutoAdvance, 250);
-      }
+      statusStartTime = Date.now();
+      isUpdatingState = false; // снимаем блок при переходе на новый этап
     }
 
-    // Управление видимостью кнопки «Завершить игру»
+    // Отображение кнопки экстренной остановки на игровых экранах
     const btnStopGlobal = document.getElementById('btnStopGlobal');
     if (['question', 'reveal', 'leaderboard'].includes(state.status)) {
       btnStopGlobal.style.display = 'inline-block';
@@ -251,69 +249,67 @@
 
       document.getElementById('btnReveal').style.display = revealed ? 'none' : 'inline-block';
       document.getElementById('btnNext').style.display = revealed ? 'inline-block' : 'none';
-
-      clearInterval(timerHandle);
-      if(!revealed){
-        updateTimer();
-        timerHandle = setInterval(updateTimer, 250);
-      } else {
-        document.getElementById('timer').textContent = '—';
-      }
     } else if(state.status === 'leaderboard'){
       showScreen('leaderboard');
       renderLeaderboard('lbList');
-      const isLast = state.current_index >= TOTAL - 1;
-      document.getElementById('btnContinue').textContent = isLast ? 'Показать итог' : 'Следующий вопрос';
     } else if(state.status === 'ended'){
       showScreen('ended');
       renderLeaderboard('finalList');
     }
-
-    // Моментально обновляем текст на кнопках при рендере, если работает автопереход
-    if (state.status === 'reveal' || state.status === 'leaderboard') {
-      handleAutoAdvance();
-    }
+    
+    // Вызываем расчет времени сразу для плавного обновления кнопок
+    tick();
   }
 
-  function updateTimer(){
-    const started = new Date(state.question_started_at).getTime();
-    const elapsed = (Date.now() - started)/1000;
-    const left = Math.max(0, Math.ceil(state.time_limit - elapsed));
-    document.getElementById('timer').textContent = left;
-    if(left <= 0){
-      clearInterval(timerHandle);
-      if(!revealed) reveal();
-    }
-  }
+  // Централизованная автоматика времени
+  async function tick() {
+    if (!state || isUpdatingState) return;
 
-  // Логика автоматического переключения экранов по времени
-  async function handleAutoAdvance() {
-    if(!state) return;
-    const elapsed = (Date.now() - stateTransitionTime) / 1000;
+    const now = Date.now();
 
-    if(state.status === 'reveal') {
-      const limit = 5; // Сколько секунд показываем правильный ответ и график
+    if (state.status === 'question') {
+      // 1. Таймер вопроса (участники отвечают)
+      const started = new Date(state.question_started_at).getTime();
+      const elapsed = (now - started) / 1000;
+      const left = Math.max(0, Math.ceil(state.time_limit - elapsed));
+      document.getElementById('timer').textContent = left;
+      
+      // Если все ответили досрочно или вышло время -> автоматом показываем ответ
+      const allAnswered = players.length > 0 && answers.length >= players.length;
+      if ((left <= 0 || allAnswered) && !revealed) {
+        isUpdatingState = true;
+        await reveal();
+      }
+    } 
+    else if (state.status === 'reveal') {
+      // 2. Таймер экрана правильного ответа (показываем 5 секунд)
+      document.getElementById('timer').textContent = '—';
+      const elapsed = (now - statusStartTime) / 1000;
+      const limit = 5; // Время показа ответа в секундах
       const left = Math.max(0, Math.ceil(limit - elapsed));
+      
       const btnNext = document.getElementById('btnNext');
-      if(btnNext) btnNext.textContent = `Далее (${left})`;
+      if (btnNext) btnNext.textContent = `Далее (${left})`;
 
-      if(elapsed >= limit) {
-        clearInterval(autoAdvanceHandle);
-        autoAdvanceHandle = null;
+      if (elapsed >= limit) {
+        isUpdatingState = true;
         await sb.from('game_state').update({status:'leaderboard'}).eq('id',1);
       }
-    } else if(state.status === 'leaderboard') {
-      const limit = 7; // Сколько секунд показываем таблицу лидеров между вопросами
+    } 
+    else if (state.status === 'leaderboard') {
+      // 3. Таймер экрана таблицы лидеров (показываем 7 секунд)
+      const elapsed = (now - statusStartTime) / 1000;
+      const limit = 7; // Время показа таблицы в секундах
       const left = Math.max(0, Math.ceil(limit - elapsed));
       const isLast = state.current_index >= TOTAL - 1;
+      
       const btnContinue = document.getElementById('btnContinue');
-      if(btnContinue) {
+      if (btnContinue) {
         btnContinue.textContent = (isLast ? 'Показать итог' : 'Следующий вопрос') + ` (${left})`;
       }
 
-      if(elapsed >= limit) {
-        clearInterval(autoAdvanceHandle);
-        autoAdvanceHandle = null;
+      if (elapsed >= limit) {
+        isUpdatingState = true;
         const nextIndex = state.current_index + 1;
         if(nextIndex >= TOTAL){
           await sb.from('game_state').update({status:'ended'}).eq('id',1);
@@ -334,7 +330,9 @@
       row.innerHTML = `<div class="lb-rank">${i+1}</div><div class="lb-name">${p.name}</div><div class="lb-score">${p.score}</div>`;
       el.appendChild(row);
     });
-    document.getElementById('lbSub') && (document.getElementById('lbSub').textContent = 'После вопроса ' + (state.current_index+1) + ' из ' + TOTAL);
+    if (document.getElementById('lbSub')) {
+      document.getElementById('lbSub').textContent = 'После вопроса ' + (state.current_index+1) + ' из ' + TOTAL;
+    }
   }
 
   function pluralPart(n){
@@ -348,31 +346,43 @@
     revealed = true;
     const item = QUESTIONS[state.current_index];
     const started = new Date(state.question_started_at).getTime();
+    
+    // Параллельное начисление очков, чтобы не вызывать задержек
+    const scoreUpdates = [];
     for(const a of answers){
       if(a.correct){
         const elapsedMs = new Date(a.answered_at).getTime() - started;
         const ratio = Math.min(1, elapsedMs / (state.time_limit*1000));
         const pts = Math.round(500 + 500*(1-ratio));
         const p = players.find(pl=>pl.id===a.player_id);
-        if(p){ await sb.from('players').update({score: p.score + pts}).eq('id', p.id); }
+        if(p){ 
+          scoreUpdates.push(sb.from('players').update({score: p.score + pts}).eq('id', p.id)); 
+        }
       }
+    }
+    if (scoreUpdates.length > 0) {
+      await Promise.all(scoreUpdates);
     }
     await sb.from('game_state').update({status:'reveal'}).eq('id',1);
   }
 
   document.getElementById('btnStart').addEventListener('click', async ()=>{
+    isUpdatingState = true;
     await sb.from('game_state').update({status:'question', current_index:0, question_started_at: new Date().toISOString()}).eq('id',1);
   });
 
-  document.getElementById('btnReveal').addEventListener('click', reveal);
+  document.getElementById('btnReveal').addEventListener('click', async () => {
+    isUpdatingState = true;
+    await reveal();
+  });
 
   document.getElementById('btnNext').addEventListener('click', async ()=>{
-    if (autoAdvanceHandle) clearInterval(autoAdvanceHandle);
+    isUpdatingState = true;
     await sb.from('game_state').update({status:'leaderboard'}).eq('id',1);
   });
 
   document.getElementById('btnContinue').addEventListener('click', async ()=>{
-    if (autoAdvanceHandle) clearInterval(autoAdvanceHandle);
+    isUpdatingState = true;
     const nextIndex = state.current_index + 1;
     if(nextIndex >= TOTAL){
       await sb.from('game_state').update({status:'ended'}).eq('id',1);
@@ -381,22 +391,21 @@
     }
   });
 
-  // Обработчик для кнопки экстренной остановки игры
+  // Кнопка экстренной / досрочной остановки игры
   document.getElementById('btnStopGlobal').addEventListener('click', async () => {
-    if(confirm('Вы уверены, что хотите досрочно завершить игру и показать итоговую статистику?')) {
-      if (autoAdvanceHandle) clearInterval(autoAdvanceHandle);
-      autoAdvanceHandle = null;
+    if(confirm('Вы уверены, что хотите досрочно прервать игру и показать финальные результаты и статистику?')) {
+      isUpdatingState = true;
       await sb.from('game_state').update({status:'ended'}).eq('id',1);
     }
   });
 
   async function resetGame(){
-    if (autoAdvanceHandle) clearInterval(autoAdvanceHandle);
-    autoAdvanceHandle = null;
+    isUpdatingState = true;
     await sb.from('answers').delete().neq('player_id','00000000-0000-0000-0000-000000000000');
     await sb.from('players').delete().neq('id','00000000-0000-0000-0000-000000000000');
     await sb.from('game_state').update({status:'lobby', current_index:-1, question_started_at:null}).eq('id',1);
   }
+  
   document.getElementById('btnReset').addEventListener('click', ()=>{
     if(confirm('Начать новую игру? Все участники и очки будут сброшены.')) resetGame();
   });
